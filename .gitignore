@@ -1,0 +1,6 @@
+venv
+*.pyc
+wandb
+logs
+outputs
+.vscode
