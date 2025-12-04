@@ -4,6 +4,7 @@ from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_sc
 import numpy as np
 import os
 from tqdm import tqdm
+from src.utils import EarlyStopping
 
 class Trainer:
     def __init__(
@@ -14,7 +15,8 @@ class Trainer:
         device, 
         wandb_run,
         fold_idx,
-        checkpoint_dir="outputs/checkpoints"
+        checkpoint_dir="outputs/checkpoints",
+        scheduler=None 
     ):
         self.model = model
         self.optimizer = optimizer
@@ -23,6 +25,7 @@ class Trainer:
         self.wandb_run = wandb_run
         self.fold_idx = fold_idx
         self.checkpoint_dir = checkpoint_dir
+        self.scheduler = scheduler
         
         # Creiamo la cartella per i checkpoint se non esiste
         os.makedirs(self.checkpoint_dir, exist_ok=True)
@@ -130,13 +133,22 @@ class Trainer:
             "val_recall": val_recall
         }
 
-    def fit(self, train_loader, val_loader, test_loader=None, epochs=50, patience=10):
+    def fit(self, train_loader, val_loader, test_loader=None, 
+            epochs=50, patience=10, 
+            monitor_metric="val_f1", monitor_mode="max"):
         """
         Esegue il training. 
         Se test_loader è fornito, valuta il test set SOLO quando il modello migliora sul val set.
+        Args:
+            monitor_metric (str): Nome della metrica da monitorare per early stopping (es. 'val_loss', 'val_f1').
+            monitor_mode (str): 'min' (per loss) o 'max' (per score).
         """
         print(f"Starting training for Fold {self.fold_idx}...")
-        epochs_no_improve = 0
+        
+
+        # Inizializza Early Stopping
+        early_stopping = EarlyStopping(patience=patience, mode=monitor_mode, verbose=True)
+        best_val_score_display = 0.0
         
         # Teniamo traccia delle metriche del test set corrispondenti al miglior modello di validazione
         best_test_metrics = {} 
@@ -147,28 +159,36 @@ class Trainer:
             
             # 2. Validation Step (Internal Validation per Early Stopping)
             val_metrics = self.validate(val_loader, epoch)
+
+            current_score = val_metrics[monitor_metric]
+
+            # 3. SCHEDULER STEP (Gestione Polimorfica)
+            if self.scheduler is not None:
+                if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    # Plateau ha bisogno della metrica per sapere se ridurre
+                    self.scheduler.step(current_score)
+                else:
+                    # Cosine e Step avanzano in base all'epoca, senza guardare la metrica
+                    self.scheduler.step()
             
-            # Logica di salvataggio e Test
-            current_val_f1 = val_metrics['val_f1']
-            is_best = False
+            # Log del Learning Rate attuale su WandB
+            current_lr = self.optimizer.param_groups[0]['lr']
+            self.wandb_run.log({f"fold_{self.fold_idx}/lr": current_lr, "epoch": epoch})
             
-            if current_val_f1 > self.best_val_f1:
-                self.best_val_f1 = current_val_f1
-                self.best_epoch = epoch
-                epochs_no_improve = 0
-                is_best = True
+            # 4. Check Early Stopping
+            early_stopping(current_score)
+            
+            if early_stopping.is_best:
+                best_val_score_display = current_score
                 
                 # Salva checkpoint
                 ckpt_path = os.path.join(self.checkpoint_dir, f"best_model_fold_{self.fold_idx}.pth")
                 torch.save(self.model.state_dict(), ckpt_path)
                 
-                # --- CRUCIALE: Se abbiamo un Test Set, lo valutiamo ORA ---
+                # Valuta Test Set (solo se siamo migliorati)
                 if test_loader is not None:
                     test_metrics = self.validate(test_loader, epoch)
-                    # Rinominiamo le chiavi da 'val_...' a 'test_...' per il log
                     best_test_metrics = {k.replace("val_", "test_"): v for k, v in test_metrics.items()}
-            else:
-                epochs_no_improve += 1
 
             # 3. Logging su WandB
             log_dict = {"epoch": epoch}
@@ -182,40 +202,31 @@ class Trainer:
                 log_dict[f"fold_{self.fold_idx}/val/{k.replace('val_', '')}"] = v
             
             # Aggiungi Test (Solo se esiste)
-            if test_loader is not None:
-                # Se best_test_metrics è vuoto (prima epoca e non è best), logghiamo 0 o NaN
-                if not best_test_metrics and is_best:
-                     pass # È stato appena riempito sopra
-                elif not best_test_metrics and not is_best:
-                     # Caso raro: prima epoca fa schifo, non abbiamo metriche di test. 
-                     # Non logghiamo nulla per il test o logghiamo 0.
-                     pass 
-                else:
-                    # Logghiamo le metriche del test corrispondenti al MIGLIOR modello di val trovato finora
-                    # (Quindi se non migliora, logghiamo il valore vecchio -> linea piatta)
-                    for k, v in best_test_metrics.items():
-                        log_dict[f"fold_{self.fold_idx}/{k}"] = v # k ha già 'test_' dentro
+            if test_loader is not None and best_test_metrics:
+                for k, v in best_test_metrics.items():
+                    log_dict[f"fold_{self.fold_idx}/{k}"] = v
 
             self.wandb_run.log(log_dict)
             
             # Print console
-            log_str = (f"Ep {epoch} | Train Loss: {train_metrics['train_loss']:.4f} | "
-                       f"Val F1: {val_metrics['val_f1']:.3f}")
+            log_str = (f"Ep {epoch} | LR: {current_lr:.2e} | Train Loss: {train_metrics['train_loss']:.4f} | "
+                       f"{monitor_metric}: {current_score:.4f}")
+            
+            if early_stopping.is_best:
+                log_str += " [BEST]"
+            
             if test_loader is not None and best_test_metrics:
                 log_str += f" | Test F1 (Best Val): {best_test_metrics.get('test_f1', 0):.3f}"
+            
             print(log_str)
 
-            # Early Stopping
-            if epochs_no_improve >= patience:
-                print(f"Early stopping at epoch {epoch}. Best Val F1: {self.best_val_f1:.4f}")
+            # Stop?
+            if early_stopping.early_stop:
+                print(f"Early stopping at epoch {epoch}. Best {monitor_metric}: {best_val_score_display:.4f}")
                 break
         
-        # Fine Training
-        # Se c'è un test set, il valore che conta per il summary finale è l'F1 sul test
-        # del modello scelto tramite validazione.
+        # Return finale
         if test_loader is not None:
-            final_score = best_test_metrics.get('test_f1', 0.0)
-            print(f"Fold {self.fold_idx} Final Score (Test F1): {final_score:.4f}")
-            return final_score
+            return best_test_metrics.get('test_f1', 0.0)
         else:
-            return self.best_val_f1
+            return best_val_score_display

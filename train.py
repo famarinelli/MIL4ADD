@@ -30,10 +30,21 @@ def main():
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size (numero di pazienti per batch)")
     parser.add_argument("--epochs", type=int, default=50, help="Numero massimo di epoche")
     parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate")
-    parser.add_argument("--weight_decay", type=float, default=1e-3, help="Regolarizzazione")
+    parser.add_argument("--optimizer", type=str, default="Adam", choices=["Adam", "AdamW", "SGD", "RAdam"], help="Tipo di ottimizzatore")
+    parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay (L2 penalty)")
+    parser.add_argument("--momentum", type=float, default=0.9, help="Momentum (solo per SGD)")
     parser.add_argument("--patience", type=int, default=10, help="Patience per early stopping")
+    parser.add_argument("--monitor_metric", type=str, default="val_loss", help="Metrica per Early Stopping (es. val_loss, val_f1)")
+    parser.add_argument("--monitor_mode", type=str, default="min", help="Mode per Early Stopping (min, max)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed per replicabilità")
     parser.add_argument("--max_instances", type=int, default=None, help="Seleziona le Top N istanze più lunghe (es. 50). Se None, usa tutte.")
+    
+    # --- Argomenti Scheduler ---
+    parser.add_argument("--scheduler", type=str, default="Plateau", choices=["Plateau", "Cosine", "Step", "None"], help="Tipo di Scheduler")
+    parser.add_argument("--lr_patience", type=int, default=5, help="Pazienza per ReduceLROnPlateau")
+    parser.add_argument("--lr_factor", type=float, default=0.5, help="Fattore di riduzione LR (per Plateau e Step)")
+    parser.add_argument("--lr_step_size", type=int, default=20, help="Ogni quante epoche ridurre LR (per StepLR)")
+    parser.add_argument("--lr_min", type=float, default=1e-6, help="Learning rate minimo")
     
     # Iperparametri Modello
     parser.add_argument("--model_name", type=str, required=True, choices=["MILModel", "MultiMTRB"], help="Model name")
@@ -238,8 +249,71 @@ def main():
         # Sposta il modello sul device (GPU/CPU)
         model.to(device)
         
-        # C. Ottimizzatore e Loss
-        optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        # C. Ottimizzatore, Scheduler e Loss
+        # --- Setup Optimizer ---
+        print(f"Optimizer: {args.optimizer} | LR: {args.lr} | WD: {args.weight_decay}")
+        
+        if args.optimizer == "Adam":
+            optimizer = torch.optim.Adam(
+                model.parameters(), 
+                lr=args.lr, 
+                weight_decay=args.weight_decay
+            )
+        elif args.optimizer == "AdamW":
+            optimizer = torch.optim.AdamW(
+                model.parameters(), 
+                lr=args.lr, 
+                weight_decay=args.weight_decay
+            )
+        elif args.optimizer == "SGD":
+            optimizer = torch.optim.SGD(
+                model.parameters(), 
+                lr=args.lr, 
+                momentum=args.momentum, 
+                weight_decay=args.weight_decay
+            )
+        elif args.optimizer == "RAdam":
+            optimizer = torch.optim.RAdam(
+                model.parameters(), 
+                lr=args.lr, 
+                weight_decay=args.weight_decay
+            )
+        else:
+            raise ValueError(f"Optimizer {args.optimizer} non supportato.")
+        
+
+        # --- Setup Scheduler ---
+        scheduler = None
+        if args.scheduler == "Plateau":
+            print(f"Scheduler: ReduceLROnPlateau (patience={args.lr_patience}, factor={args.lr_factor})")
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, 
+                mode=args.monitor_mode, # 'max' per F1, 'min' per Loss
+                factor=args.lr_factor, 
+                patience=args.lr_patience, 
+                min_lr=args.lr_min,
+                verbose=True
+            )
+        elif args.scheduler == "Cosine":
+            print(f"Scheduler: CosineAnnealingLR (T_max={args.epochs})")
+            # T_max è solitamente il numero totale di epoche
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, 
+                T_max=args.epochs, 
+                eta_min=args.lr_min
+            )
+        elif args.scheduler == "Step":
+            print(f"Scheduler: StepLR (step_size={args.lr_step_size}, gamma={args.lr_factor})")
+            scheduler = torch.optim.lr_scheduler.StepLR(
+                optimizer, 
+                step_size=args.lr_step_size, 
+                gamma=args.lr_factor
+            )
+        elif args.scheduler == "None":
+            print("Scheduler: Nessuno")
+            scheduler = None
+        
+        # Setup Loss
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight) # Adatta per classificazione binaria
         
         # D. Training
@@ -250,10 +324,19 @@ def main():
             device=device,
             wandb_run=run,
             fold_idx=fold_idx,
-            checkpoint_dir=checkpoints_dir
+            checkpoint_dir=checkpoints_dir,
+            scheduler=scheduler
         )
         
-        best_f1 = trainer.fit(train_loader, val_loader, test_loader=test_loader, epochs=args.epochs, patience=args.patience)
+        best_f1 = trainer.fit(
+            train_loader, 
+            val_loader, 
+            test_loader=test_loader, 
+            epochs=args.epochs, 
+            patience=args.patience,
+            monitor_metric=args.monitor_metric,
+            monitor_mode=args.monitor_mode 
+        )
         
         # Salviamo il risultato
         fold_results.append(best_f1)

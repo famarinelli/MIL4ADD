@@ -6,6 +6,52 @@ import random
 import numpy as np
 import torch
 
+class EarlyStopping:
+    """
+    Classe helper per gestire l'Early Stopping in modo modulare.
+    Supporta sia la minimizzazione (es. val_loss) che la massimizzazione (es. val_f1).
+    """
+    def __init__(self, patience=10, mode='max', delta=0.0, verbose=True):
+        """
+        Args:
+            patience (int): Quante epoche aspettare dopo l'ultimo miglioramento.
+            mode (str): 'min' per loss, 'max' per metriche (acc, f1).
+            delta (float): Miglioramento minimo richiesto per resettare il contatore.
+        """
+        self.patience = patience
+        self.mode = mode
+        self.delta = delta
+        self.verbose = verbose
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+        self.is_best = False # Flag per indicare se l'epoch corrente è la migliore
+
+        if self.mode == 'min':
+            self.val_score_fn = lambda x: -x # Invertiamo il segno per usare sempre logica >
+        else:
+            self.val_score_fn = lambda x: x
+
+    def __call__(self, current_score):
+        score = self.val_score_fn(current_score)
+        self.is_best = False
+
+        if self.best_score is None:
+            self.best_score = score
+            self.is_best = True
+        elif score < self.best_score + self.delta:
+            # Nessun miglioramento significativo
+            self.counter += 1
+            if self.verbose:
+                print(f"EarlyStopping counter: {self.counter} out of {self.patience}")
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            # Miglioramento trovato
+            self.best_score = score
+            self.is_best = True
+            self.counter = 0
+
 def set_seed(seed: int = 42):
     """
     Imposta il seed per la riproducibilità degli esperimenti.
