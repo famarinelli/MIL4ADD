@@ -3,91 +3,102 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class MultiMTRB(nn.Module):
-    def __init__(self, input_dim, pooling_type='attention', hidden_dim=256, dropout=0.3, alpha=0.8, beta=5, **kwargs):
+    def __init__(self, input_dim, num_branches=2, pooling_type='attention', hidden_dim=256, dropout=0.3, alpha=0.8, beta=5, **kwargs):
         """
-        Implementazione MultiMTRB (Instance-Level MIL) con logica Alpha/Beta.
+        Implementazione Multi-Branch MIL parametrica.
+        Accetta un numero arbitrario di tipi di embedding concatenati.
         
         Args:
-            input_dim (int): Dimensione totale (MT5 + RoBERTa).
-            alpha (float): Soglia di confidenza per considerare un'istanza "fortemente depressiva".
-            beta (int): Numero minimo di istanze depressive (con score > 0.5) per classificare la bag come positiva.
+            input_dim (int): Dimensione totale delle feature concatenate.
+            num_branches (int): Numero di modelli/modalità (es. 2 per RoBERTa+MT5).
+            alpha (float): Soglia confidenza istanza.
+            beta (int): Soglia conteggio istanze positive.
         """
         super().__init__()
         
-        if input_dim % 2 != 0:
-            raise ValueError(f"Input dim {input_dim} dispari. Atteso concatenazione di 2 modelli.")
-        
-        self.half_dim = input_dim // 2
+        self.num_branches = num_branches
         self.alpha = alpha
         self.beta = beta
         
-        # --- Ramo 1: RoBERTa Instance Classifier ---
-        # Proietta e classifica OGNI istanza indipendentemente
-        self.branch1 = nn.Sequential(
-            nn.Linear(self.half_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 1) # Output: Logit per istanza
-        )
+        # Controllo validità dimensioni
+        if input_dim % num_branches != 0:
+            raise ValueError(
+                f"Input dim {input_dim} non è divisibile per num_branches {num_branches}. "
+                "Assicurati che tutti i modelli di embedding abbiano la stessa dimensione."
+            )
         
-        # --- Ramo 2: MT5 Instance Classifier ---
-        self.branch2 = nn.Sequential(
-            nn.Linear(self.half_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 1) # Output: Logit per istanza
-        )
+        self.branch_dim = input_dim // num_branches
         
-        # --- Pooling per il TRAINING (Differenziabile) ---
-        # Usiamo l'Attention Pooling per aggregare i punteggi delle istanze in un punteggio bag
-        # durante il training, permettendo ai gradienti di fluire.
-        self.training_pooling = nn.Sequential(
-            nn.Linear(self.half_dim * 2, hidden_dim), # Usa le feature originali per calcolare l'attenzione
-            nn.Tanh(),
-            nn.Linear(hidden_dim, 1)
-        )
+        # Usiamo ModuleList per creare liste di layer che PyTorch riconosce come parametri
+        self.classifiers = nn.ModuleList()
+        self.att_nets = nn.ModuleList()
+        
+        for _ in range(num_branches):
+            # 1. Classificatore di istanza per questo branch
+            clf = nn.Sequential(
+                nn.Linear(self.branch_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, 1)
+            )
+            self.classifiers.append(clf)
+            
+            # 2. Attention Net specifica per questo branch
+            att = nn.Sequential(
+                nn.Linear(self.branch_dim, hidden_dim),
+                nn.Tanh(),
+                nn.Linear(hidden_dim, 1)
+            )
+            self.att_nets.append(att)
 
     def forward(self, x, mask=None):
         """
-        Ritorna:
-            bag_logit: (B, 1) - Usato per calcolare la Loss durante il training.
-            instance_scores: (B, N) - Probabilità (0-1) per ogni istanza (usato per inference).
+        Args:
+            x: (Batch, Max_Instances, Total_Dim)
         """
-        # 1. Split Input
-        x1 = x[:, :, :self.half_dim]
-        x2 = x[:, :, self.half_dim:]
+        # 1. Split Input in N parti lungo l'ultima dimensione
+        # x_splits è una tupla di N tensori, ognuno di dim (B, N, branch_dim)
+        x_splits = torch.chunk(x, self.num_branches, dim=-1)
         
-        # 2. Instance-Level Classification (Logits)
-        # Shape: (Batch, Max_Instances, 1)
-        inst_logits1 = self.branch1(x1)
-        inst_logits2 = self.branch2(x2)
+        bag_logits_list = []
+        inst_logits_list = []
         
-        # 3. Fusion (Average Vote sui Logits)
-        avg_inst_logits = (inst_logits1 + inst_logits2) / 2
+        # 2. Iteriamo su ogni branch
+        for i in range(self.num_branches):
+            feat = x_splits[i]
+            
+            # A. Instance Logits
+            inst_logits = self.classifiers[i](feat) # (B, N, 1)
+            inst_logits_list.append(inst_logits)
+            
+            # B. Attention Weights
+            att_logits = self.att_nets[i](feat) # (B, N, 1)
+            if mask is not None:
+                att_logits = att_logits.masked_fill(mask.unsqueeze(-1) == 0, -1e9)
+            att_weights = F.softmax(att_logits, dim=1)
+            
+            # C. Bag Logit (Somma pesata)
+            bag_logit = torch.sum(inst_logits * att_weights, dim=1) # (B, 1)
+            bag_logits_list.append(bag_logit)
+
+        # 3. Fusion
         
-        # 4. Calcolo Probabilità Istanze (Sigmoid)
-        # Queste servono per la logica alpha/beta
+        # A. Training: Media dei Bag Logits dei vari branch
+        # Stackiamo la lista in un tensore (Num_Branches, B, 1) e facciamo media su dim 0
+        all_bag_logits = torch.stack(bag_logits_list, dim=0)
+        final_bag_logit = torch.mean(all_bag_logits, dim=0) # (B, 1)
+        
+        # B. Inference: Media dei Logits delle Istanze
+        all_inst_logits = torch.stack(inst_logits_list, dim=0)
+        avg_inst_logits = torch.mean(all_inst_logits, dim=0) # (B, N, 1)
+        
+        # Sigmoide per ottenere score 0-1
         instance_scores = torch.sigmoid(avg_inst_logits).squeeze(-1) # (B, N)
         
         if mask is not None:
-            # Azzera i punteggi del padding per non influenzare i calcoli
             instance_scores = instance_scores * mask
-
-        # --- TRAINING PATH (Differenziabile) ---
-        # Per addestrare, dobbiamo aggregare questi punteggi in un unico logit per la bag.
-        # Usiamo un Attention Pooling pesato sulle feature originali.
         
-        # Calcolo pesi attenzione
-        att_logits = self.training_pooling(x) # (B, N, 1)
-        if mask is not None:
-            att_logits = att_logits.masked_fill(mask.unsqueeze(-1) == 0, -1e9)
-        att_weights = F.softmax(att_logits, dim=1) # (B, N, 1)
-        
-        # Aggregazione pesata dei LOGIT delle istanze (MIL-Pooling approssimato)
-        # Somma pesata dei logit delle istanze -> Logit della Bag
-        bag_logit = torch.sum(avg_inst_logits * att_weights, dim=1) # (B, 1)
-        
-        return bag_logit, instance_scores
+        return final_bag_logit, instance_scores
 
     def predict_with_rules(self, instance_scores, mask, lengths):
         """

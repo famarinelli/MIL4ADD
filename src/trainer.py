@@ -88,7 +88,6 @@ class Trainer:
         running_loss = 0.0
         all_preds = []
         all_labels = []
-        all_probs = []
         
         with torch.no_grad():
             pbar = tqdm(val_loader, desc=f"Fold {self.fold_idx} - Epoch {epoch} [VAL]", leave=False)
@@ -96,28 +95,25 @@ class Trainer:
                 features = batch['features'].to(self.device)
                 mask = batch['mask'].to(self.device)
                 labels = batch['labels'].to(self.device)
+                lengths = batch['lengths']
                 
-                logits, _ = self.model(features, mask)
-                logits = logits.squeeze(1)
+                bag_logits, instance_scores = self.model(features, mask)
+                bag_logits = bag_logits.squeeze(1)
                 
-                loss = self.criterion(logits, labels)
+                loss = self.criterion(bag_logits, labels)
                 running_loss += loss.item()
                 
-                probs = torch.sigmoid(logits)
-                preds = (probs > 0.5).float()
+                # --- PREDICITON CON REGOLE ALPHA/BETA ---
+                # Verifichiamo se il modello ha il metodo custom (MultiMTRB)
+                if hasattr(self.model, 'predict_with_rules'):
+                    preds = self.model.predict_with_rules(instance_scores, mask, lengths)
+                else:
+                    # Fallback per modelli standard (MILModel)
+                    probs = torch.sigmoid(bag_logits)
+                    preds = (probs > 0.5).float()
                 
                 all_preds.extend(preds.cpu().numpy())
                 all_labels.extend(labels.cpu().numpy())
-                all_probs.extend(probs.cpu().numpy())
-            
-            # DEBUG: Vediamo le probabilità medie predette per la classe 0 e la classe 1
-            all_probs = np.array(all_probs)
-            all_labels = np.array(all_labels)
-            
-            mean_prob_neg = all_probs[all_labels == 0].mean() if (all_labels == 0).any() else 0.0
-            mean_prob_pos = all_probs[all_labels == 1].mean() if (all_labels == 1).any() else 0.0
-            
-            print(f"  [DEBUG PROBS] Avg Prob Neg: {mean_prob_neg:.4f} | Avg Prob Pos: {mean_prob_pos:.4f}")
 
         # Calcolo metriche
         val_loss = running_loss / len(val_loader)

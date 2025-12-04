@@ -215,6 +215,7 @@ def main():
             # Nota: input_dim deve essere la somma delle dim dei due modelli (es. 768+768=1536)
             model = ModelClass(
                 input_dim=input_dim,
+                num_branches = len(args.embedding_files),
                 hidden_dim=args.hidden_dim,
                 dropout=args.dropout,
                 alpha=args.alpha,
