@@ -91,6 +91,8 @@ class Trainer:
         running_loss = 0.0
         all_preds = []
         all_labels = []
+
+        all_preds_custom = []
         
         with torch.no_grad():
             pbar = tqdm(val_loader, desc=f"Fold {self.fold_idx} - Epoch {epoch} [VAL]", leave=False)
@@ -109,11 +111,12 @@ class Trainer:
                 # --- PREDICITON CON REGOLE ALPHA/BETA ---
                 # Verifichiamo se il modello ha il metodo custom (MultiMTRB)
                 if hasattr(self.model, 'predict_with_rules'):
-                    preds = self.model.predict_with_rules(instance_scores, mask, lengths)
-                else:
-                    # Fallback per modelli standard (MILModel)
-                    probs = torch.sigmoid(bag_logits)
-                    preds = (probs > 0.5).float()
+                    custom_preds = self.model.predict_with_rules(instance_scores, mask, lengths)
+                    all_preds_custom.extend(custom_preds.cpu().numpy())
+
+                # Per modelli standard (MILModel)
+                probs = torch.sigmoid(bag_logits)
+                preds = (probs > 0.5).float()
                 
                 all_preds.extend(preds.cpu().numpy())
                 all_labels.extend(labels.cpu().numpy())
@@ -124,14 +127,22 @@ class Trainer:
         val_f1 = f1_score(all_labels, all_preds, zero_division=0)
         val_precision = precision_score(all_labels, all_preds, zero_division=0)
         val_recall = recall_score(all_labels, all_preds, zero_division=0)
-        
-        return {
+
+        output_dict = {
             "val_loss": val_loss,
             "val_acc": val_acc,
             "val_f1": val_f1,
             "val_precision": val_precision,
             "val_recall": val_recall
-        }
+        } 
+
+        if all_preds_custom:
+            output_dict["val_acc_custom"] = accuracy_score(all_labels, all_preds_custom),
+            output_dict["val_f1_custom"] = f1_score(all_labels, all_preds_custom, zero_division=0),
+            output_dict["val_precision_custom"] = precision_score(all_labels, all_preds_custom, zero_division=0),
+            output_dict["val_recall_custom"] = recall_score(all_labels, all_preds_custom, zero_division=0)
+        
+        return output_dict 
 
     def fit(self, train_loader, val_loader, test_loader=None, 
             epochs=50, patience=10, 
@@ -204,7 +215,7 @@ class Trainer:
             # Aggiungi Test (Solo se esiste)
             if test_loader is not None and best_test_metrics:
                 for k, v in best_test_metrics.items():
-                    log_dict[f"fold_{self.fold_idx}/{k}"] = v
+                    log_dict[f"fold_{self.fold_idx}/test/{k.replace('test_', '')}"] = v
 
             self.wandb_run.log(log_dict)
             
