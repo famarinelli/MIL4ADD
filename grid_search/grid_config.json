@@ -1,0 +1,77 @@
+{
+    "project_name": "MIL4ADD_FullGrid",
+    "script_path": "train.py",
+    "slurm_template": "jobs/grid_search/grid_template.sh",
+    
+    "fixed_params": {
+        "processed_csv": "data/processed/processed_instances.csv",
+        "embedding_files": ["data/embeddings/roberta-base_embeddings.pt", "data/embeddings/google_mt5-base_embeddings.pt"],
+        "k_folds": 5,
+        "epochs": 100,
+        "batch_size": 32,
+        "model_name": "MultiMTRB",
+        "wandb_project": "MIL4ADD",
+        "wandb_entity": "multimodal_decider",
+        "internal_val_size": 0.15,
+        "mc_dropout_samples": 10,
+        "max_instances": 50
+    },
+
+    "base_grid": {
+        "alpha": [0.75, 0.85],
+        "beta": [4, 6],
+        "hidden_dim": [128, 256],
+        "dropout": [0.3, 0.5]
+    },
+
+    "conditional_groups": [
+        {
+            "name": "AdamW_Cosine",
+            "description": "Standard moderno per Transformer. Veloce e stabile.",
+            "grid": {
+                "optimizer": ["AdamW"],
+                "lr": [0.001, 0.0005],
+                "weight_decay": [0.01],
+                "scheduler": ["Cosine"],
+                "lr_min": [1e-6]
+            }
+        },
+        {
+            "name": "AdamW_Plateau",
+            "description": "AdamW con riduzione LR adattiva. Buono se non sai quante epoche servono.",
+            "grid": {
+                "optimizer": ["AdamW"],
+                "lr": [0.001],
+                "weight_decay": [0.01],
+                "scheduler": ["Plateau"],
+                "lr_patience": [10],
+                "lr_factor": [0.5]
+            }
+        },
+        {
+            "name": "SGD_Momentum_Cosine",
+            "description": "SGD spesso generalizza meglio di Adam. Qui testiamo il Momentum.",
+            "grid": {
+                "optimizer": ["SGD"],
+                "lr": [0.01, 0.005], 
+                "momentum": [0.9],
+                "weight_decay": [1e-4],
+                "scheduler": ["Cosine"],
+                "lr_min": [1e-5]
+            }
+        },
+        {
+            "name": "SGD_Momentum_Plateau",
+            "description": "SGD con Plateau. Utile per spremere il modello alla fine.",
+            "grid": {
+                "optimizer": ["SGD"],
+                "lr": [0.01],
+                "momentum": [0.8, 0.9],
+                "weight_decay": [1e-4],
+                "scheduler": ["Plateau"],
+                "lr_patience": [15],
+                "lr_factor": [0.1]
+            }
+        }
+    ]
+}

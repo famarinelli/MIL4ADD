@@ -16,6 +16,7 @@ class Trainer:
         wandb_run,
         fold_idx,
         checkpoint_dir="outputs/checkpoints",
+        mc_dropout_samples=10,
         scheduler=None 
     ):
         self.model = model
@@ -26,6 +27,7 @@ class Trainer:
         self.fold_idx = fold_idx
         self.checkpoint_dir = checkpoint_dir
         self.scheduler = scheduler
+        self.mc_dropout_samples = mc_dropout_samples 
         
         # Creiamo la cartella per i checkpoint se non esiste
         os.makedirs(self.checkpoint_dir, exist_ok=True)
@@ -33,6 +35,12 @@ class Trainer:
         # Per tenere traccia del miglior modello
         self.best_val_f1 = 0.0
         self.best_epoch = 0
+
+    def _enable_dropout(self, model):
+        """Attiva i layer di Dropout per MC Dropout."""
+        for m in model.modules():
+            if isinstance(m, nn.Dropout):
+                m.train()
 
     def train_epoch(self, train_loader, epoch):
         self.model.train()
@@ -88,10 +96,15 @@ class Trainer:
 
     def validate(self, val_loader, epoch):
         self.model.eval()
+        
+        # --- MC DROPOUT SETUP ---
+        # Se richiesto, riattiviamo SOLO i layer di Dropout
+        if self.mc_dropout_samples > 1:
+            self._enable_dropout(self.model)
+            
         running_loss = 0.0
         all_preds = []
         all_labels = []
-
         all_preds_custom = []
         
         with torch.no_grad():
@@ -102,47 +115,76 @@ class Trainer:
                 labels = batch['labels'].to(self.device)
                 lengths = batch['lengths']
                 
-                bag_logits, instance_scores = self.model(features, mask)
-                bag_logits = bag_logits.squeeze(1)
+                # --- MC DROPOUT LOOP ---
+                accumulated_bag_logits = None
+                accumulated_instance_scores = None
                 
-                loss = self.criterion(bag_logits, labels)
+                # Determiniamo quante iterazioni fare (1 se normale, N se MC)
+                n_passes = self.mc_dropout_samples if self.mc_dropout_samples > 1 else 1
+                
+                for _ in range(n_passes):
+                    # Forward pass
+                    # Nota: MultiMTRB ritorna (bag_logit, instance_scores)
+                    #       MILModel ritorna (bag_logit, attention_weights)
+                    out1, out2 = self.model(features, mask)
+                    
+                    curr_bag_logits = out1.squeeze(1)
+                    curr_second_output = out2 # Scores o Attention
+                    
+                    # Accumulo Bag Logits
+                    if accumulated_bag_logits is None:
+                        accumulated_bag_logits = curr_bag_logits
+                    else:
+                        accumulated_bag_logits += curr_bag_logits
+                        
+                    # Accumulo Second Output (Scores/Attention)
+                    if accumulated_instance_scores is None:
+                        accumulated_instance_scores = curr_second_output
+                    else:
+                        accumulated_instance_scores += curr_second_output
+                
+                # --- MEDIA DEI PASSAGGI ---
+                avg_bag_logits = accumulated_bag_logits / n_passes
+                avg_second_output = accumulated_instance_scores / n_passes
+                
+                # --- CALCOLO LOSS E METRICHE STANDARD ---
+                # Usiamo i logit mediati
+                loss = self.criterion(avg_bag_logits, labels)
                 running_loss += loss.item()
                 
-                # --- PREDICITON CON REGOLE ALPHA/BETA ---
-                # Verifichiamo se il modello ha il metodo custom (MultiMTRB)
-                if hasattr(self.model, 'predict_with_rules'):
-                    custom_preds = self.model.predict_with_rules(instance_scores, mask, lengths)
-                    all_preds_custom.extend(custom_preds.cpu().numpy())
-
-                # Per modelli standard (MILModel)
-                probs = torch.sigmoid(bag_logits)
+                probs = torch.sigmoid(avg_bag_logits)
                 preds = (probs > 0.5).float()
                 
                 all_preds.extend(preds.cpu().numpy())
                 all_labels.extend(labels.cpu().numpy())
+                
+                # --- PREDIZIONE CON REGOLE ALPHA/BETA (CUSTOM) ---
+                # Verifichiamo se il modello ha il metodo custom (MultiMTRB)
+                if hasattr(self.model, 'predict_with_rules'):
+                    # Passiamo gli score mediati (avg_second_output)
+                    custom_preds = self.model.predict_with_rules(avg_second_output, mask, lengths)
+                    all_preds_custom.extend(custom_preds.cpu().numpy())
 
-        # Calcolo metriche
+        # Calcolo metriche Standard
         val_loss = running_loss / len(val_loader)
-        val_acc = accuracy_score(all_labels, all_preds)
-        val_f1 = f1_score(all_labels, all_preds, zero_division=0)
-        val_precision = precision_score(all_labels, all_preds, zero_division=0)
-        val_recall = recall_score(all_labels, all_preds, zero_division=0)
-
+        
         output_dict = {
             "val_loss": val_loss,
-            "val_acc": val_acc,
-            "val_f1": val_f1,
-            "val_precision": val_precision,
-            "val_recall": val_recall
+            "val_acc": accuracy_score(all_labels, all_preds),
+            "val_f1": f1_score(all_labels, all_preds, zero_division=0),
+            "val_precision": precision_score(all_labels, all_preds, zero_division=0),
+            "val_recall": recall_score(all_labels, all_preds, zero_division=0)
         } 
 
+        # Calcolo metriche Custom (se disponibili)
         if all_preds_custom:
-            output_dict["val_acc_custom"] = accuracy_score(all_labels, all_preds_custom),
-            output_dict["val_f1_custom"] = f1_score(all_labels, all_preds_custom, zero_division=0),
-            output_dict["val_precision_custom"] = precision_score(all_labels, all_preds_custom, zero_division=0),
+            # Nota: ho rimosso le virgole finali che c'erano nel tuo snippet (creavano tuple invece di float)
+            output_dict["val_acc_custom"] = accuracy_score(all_labels, all_preds_custom)
+            output_dict["val_f1_custom"] = f1_score(all_labels, all_preds_custom, zero_division=0)
+            output_dict["val_precision_custom"] = precision_score(all_labels, all_preds_custom, zero_division=0)
             output_dict["val_recall_custom"] = recall_score(all_labels, all_preds_custom, zero_division=0)
         
-        return output_dict 
+        return output_dict
 
     def fit(self, train_loader, val_loader, test_loader=None, 
             epochs=50, patience=10, 

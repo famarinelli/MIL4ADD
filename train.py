@@ -38,6 +38,7 @@ def main():
     parser.add_argument("--monitor_mode", type=str, default="min", help="Mode per Early Stopping (min, max)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed per replicabilità")
     parser.add_argument("--max_instances", type=int, default=None, help="Seleziona le Top N istanze più lunghe (es. 50). Se None, usa tutte.")
+    parser.add_argument("--mc_dropout_samples", type=int, default=1, help="Numero di passaggi Monte Carlo Dropout in validazione (1 = disattivato, >1 = attivo)")
     
     # --- Argomenti Scheduler ---
     parser.add_argument("--scheduler", type=str, default="Plateau", choices=["Plateau", "Cosine", "Step", "None"], help="Tipo di Scheduler")
@@ -325,7 +326,8 @@ def main():
             wandb_run=run,
             fold_idx=fold_idx,
             checkpoint_dir=checkpoints_dir,
-            scheduler=scheduler
+            scheduler=scheduler,
+            mc_dropout_samples=args.mc_dropout_samples 
         )
         
         best_f1 = trainer.fit(
