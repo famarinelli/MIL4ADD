@@ -22,14 +22,15 @@ def main():
     parser.add_argument("--processed_csv", type=str, default="data/processed/processed_instances.csv", help="Path al CSV processato")
     parser.add_argument("--embedding_files", nargs='+', required=True, help="Lista dei file .pt degli embedding (es. data/embeddings/roberta.pt data/embeddings/mt5.pt)")
     parser.add_argument("--splits_dir", type=str, default="splits", help="Cartella dove salvare/caricare gli split JSON")
+    parser.add_argument("--splits_csv", type=str, default=None, help="Path al CSV contenente gli split predefiniti (opzionale). Se fornito, ignora splits_dir")
     parser.add_argument("--output_dir", type=str, default="outputs", help="Cartella per salvare risultati e checkpoint")
     
     # Iperparametri Training
     parser.add_argument("--k_folds", type=int, default=5, help="Numero di fold per la CV")
     parser.add_argument("--internal_val_size", type=float, default=0.15, help="Percentuale di training set da usare come validazione interna (0.0 per disabilitare)")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size (numero di pazienti per batch)")
-    parser.add_argument("--epochs", type=int, default=50, help="Numero massimo di epoche")
-    parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate")
+    parser.add_argument("--batch_size", type=int, default=128, help="Batch size (numero di pazienti per batch)")
+    parser.add_argument("--epochs", type=int, default=100, help="Numero massimo di epoche")
+    parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
     parser.add_argument("--optimizer", type=str, default="Adam", choices=["Adam", "AdamW", "SGD", "RAdam"], help="Tipo di ottimizzatore")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay (L2 penalty)")
     parser.add_argument("--momentum", type=float, default=0.9, help="Momentum (solo per SGD)")
@@ -56,7 +57,7 @@ def main():
     parser.add_argument("--dropout", type=float, default=0.3, help="Dropout rate")
     
     # WandB
-    parser.add_argument("--wandb_project", type=str, default="MIL-Depression", help="Nome progetto WandB")
+    parser.add_argument("--wandb_project", type=str, default="MIL4ADD", help="Nome progetto WandB")
     parser.add_argument("--wandb_entity", type=str, default=None, help="Tuo username/team su WandB (opzionale)")
     parser.add_argument("--exp_name", type=str, default="mil_experiment", help="Nome base per l'esperimento")
 
@@ -104,7 +105,7 @@ def main():
 
     # --- 3. Caricamento Dati e Split ---
     # Otteniamo gli split (se esistono li carica, altrimenti li crea)
-    splits = get_k_fold_splits(args.processed_csv, args.k_folds, args.splits_dir, args.seed)
+    splits = get_k_fold_splits(args.processed_csv, args.k_folds, args.splits_dir, args.seed, internal_val_size=args.internal_val_size, splits_csv_path=args.splits_csv)
 
     # Calcoliamo la dimensione dell'input dinamicamente caricando un campione
     # Questo ci evita di dover passare --input_dim a mano
@@ -125,31 +126,14 @@ def main():
         print(f"\n{'='*20} STARTING FOLD {fold_idx+1}/{args.k_folds} {'='*20}")
 
         # A. Preparazione Dataset
-        # Split originale del K-Fold (ora interpretato come Train_Full vs Test)
-        train_full_ids = split['train']
-        test_ids = split['val'] # Quello che prima era val, ora è il vero Test set
-        
         # Logica di Split Interno
         if args.internal_val_size > 0:
-            print(f"  -> Splitting Train Full ({len(train_full_ids)}) into Train/InternalVal (size={args.internal_val_size})")
+            # Se internal_val_size > 0, i split contengono già train/internal_val/test
+            print(f"  -> Using pre-computed splits with internal validation (size={args.internal_val_size})")
             
-            # Recuperiamo le label per fare uno split stratificato
-            # Creiamo un dataset temporaneo solo per leggere le label velocemente
-            temp_ds_full = MILDataset(
-                args.embedding_files, 
-                args.processed_csv, 
-                participant_ids=train_full_ids,
-                max_instances=args.max_instances 
-            )
-            full_labels = [temp_ds_full.label_map[int(pid)] for pid in train_full_ids]
-            
-            # Split Stratificato
-            real_train_ids, internal_val_ids = train_test_split(
-                train_full_ids,
-                test_size=args.internal_val_size,
-                stratify=full_labels,
-                random_state=args.seed
-            )
+            real_train_ids = split['train']
+            internal_val_ids = split['internal_val']
+            test_ids = split['test']
             
             # Creazione Dataset
             train_ds = MILDataset(
@@ -179,6 +163,10 @@ def main():
         else:
             # Modalità Legacy (Senza Test Set separato, Val fa da Test)
             print("  -> Internal Val disabled. Using standard Train/Val split.")
+            
+            train_full_ids = split['train']
+            test_ids = split['val']
+            
             train_ds = MILDataset(
                 args.embedding_files, 
                 args.processed_csv, 
