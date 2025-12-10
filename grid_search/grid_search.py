@@ -12,13 +12,14 @@ def get_combinations(grid_dict):
     for combination in itertools.product(*values):
         yield dict(zip(keys, combination))
 
-def format_arg(key, value):
-    """Formatta chiave-valore per la riga di comando."""
+def format_arg_list(key, value):
+    """Restituisce una lista [key, val] invece di una stringa."""
     if isinstance(value, list):
-        # Per argomenti come --embedding_files che prendono liste
-        return f"--{key} {' '.join(map(str, value))}"
+        # Per liste (es. embedding files), appiattiamo: --arg val1 val2
+        # Esempio: ['--embedding_files', 'file1', 'file2']
+        return [f"--{key}"] + [str(v) for v in value]
     else:
-        return f"--{key} {value}"
+        return [f"--{key}", str(value)]
 
 def main():
     CONFIG_FILE = "grid_search/grid_config.json"
@@ -59,31 +60,26 @@ def main():
                 
                 final_params["exp_name"] = exp_name
                 
-                # Costruzione stringa argomenti Python
+                # Costruzione LISTA argomenti (non stringa)
                 args_list = []
                 for k, v in final_params.items():
-                    args_list.append(format_arg(k, v))
+                    args_list.extend(format_arg_list(k, v))
                 
-                py_args = " ".join(args_list)
-                
-                # 4. Sottomissione Job Slurm
-                # Passiamo gli argomenti al template tramite variabile d'ambiente o direttamente
                 print(f"[{job_counter}] Submitting: {exp_name}")
                 
-                # Comando sbatch
-                # Usiamo --export per passare la stringa degli argomenti allo script bash
+                # Comando sbatch: passiamo gli argomenti DOPO il template
+                # Sintassi: sbatch [flags] template.sh [args_per_python...]
                 cmd = [
                     "sbatch",
                     "--job-name", exp_name,
                     "--output", f"logs/{exp_name}.out",
                     "--error", f"logs/{exp_name}.err",
-                    "--export", f"ALL,PY_ARGS=\"{py_args}\"",
+                    # Rimuoviamo --export complesso, lasciamo solo ALL per l'ambiente base
+                    "--export", "ALL", 
                     config["slurm_template"]
-                ]
+                ] + args_list # <--- Appendiamo la lista degli argomenti qui
                 
                 subprocess.run(cmd)
-                
-                # Piccolo sleep per non intasare lo scheduler Slurm
                 time.sleep(0.5)
 
     print(f"\n--- Grid Search Launched: {job_counter} jobs submitted ---")
