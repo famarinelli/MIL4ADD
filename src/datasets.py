@@ -75,15 +75,38 @@ class MILDataset(Dataset):
 
 
     def _validate_ids(self):
-        """Controlla che tutti gli ID esistano in tutti i dizionari di embedding caricati."""
+        """
+        Controlla che tutti gli ID esistano in tutti i dizionari di embedding e abbiano label.
+        Rimuove gli ID problematici dal dataset (anzichè sollevare eccezioni).
+        """
+        valid_ids = []
+        removed_count = 0
+        
         for pid in self.participant_ids:
+            is_valid = True
+            
+            # Controlla se l'ID esiste in tutti i dizionari di embedding
             for i, emb_dict in enumerate(self.embeddings_dicts):
                 if pid not in emb_dict:
-                    raise KeyError(f"L'ID {pid} non è presente nel file di embedding numero {i} ({self.embedding_paths[i]})")
+                    is_valid = False
+                    break
             
-            # IPOTESI: L'ID deve avere anche una label associata
-            if int(pid) not in self.label_map:
-                 raise KeyError(f"L'ID {pid} non ha una label associata nel file CSV fornito.")
+            # Controlla se l'ID ha una label associata
+            if is_valid and int(pid) not in self.label_map:
+                is_valid = False
+            
+            if is_valid:
+                valid_ids.append(pid)
+            else:
+                removed_count += 1
+        
+        # Aggiorna la lista di participant_ids
+        self.participant_ids = valid_ids
+        
+        # Stampa messaggio se sono stati rimossi pazienti
+        if removed_count > 0:
+            print(f"⚠️  {removed_count} pazienti rimossi dal dataset (non trovati in embedding o label)")
+
 
     def __len__(self):
         return len(self.participant_ids)

@@ -21,8 +21,8 @@ def main():
     # Dati e Percorsi
     parser.add_argument("--processed_csv", type=str, default="data/processed/processed_instances.csv", help="Path al CSV processato")
     parser.add_argument("--embedding_files", nargs='+', required=True, help="Lista dei file .pt degli embedding (es. data/embeddings/roberta.pt data/embeddings/mt5.pt)")
-    parser.add_argument("--splits_dir", type=str, default="splits", help="Cartella dove salvare/caricare gli split JSON")
-    parser.add_argument("--splits_csv", type=str, default=None, help="Path al CSV contenente gli split predefiniti (opzionale). Se fornito, ignora splits_dir")
+    parser.add_argument("--splits_dir", type=str, default="splits", help="Cartella base dove salvare/caricare gli split (contiene sottocartelle k_*_splits_*)")
+    parser.add_argument("--splits_csv", type=str, default=None, help="Percorso a una cartella con split_*.csv predefiniti (opzionale). Se fornito, ignora splits_dir")
     parser.add_argument("--output_dir", type=str, default="outputs", help="Cartella per salvare risultati e checkpoint")
     
     # Iperparametri Training

@@ -1,6 +1,6 @@
 import os
 import pandas as pd
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, train_test_split
 import random
 import numpy as np
 import torch
@@ -68,78 +68,105 @@ def set_seed(seed: int = 42):
 def _load_splits_from_csv(csv_path: str):
     """
     Carica gli split da un file CSV.
-    Il CSV deve avere colonne: fold_idx, split_type (train/internal_val/val/test), participant_id
+    Il CSV ha colonne: train, val, test (e opzionalmente internal_val)
+    I valori sono gli ID dei partecipanti.
     
     Args:
-        csv_path (str): Percorso al file CSV contenente gli split.
+        csv_path (str): Percorso al file CSV contenente uno split.
+    
+    Returns:
+        dict: Dizionario con le liste di partecipanti per train, val/internal_val, test.
+    """
+    df = pd.read_csv(csv_path)
+    split_dict = {}
+    
+    for col in df.columns:
+        # Carica i valori dalla colonna e rimuove i NaN
+        participant_ids = df[col].dropna().tolist()
+        # Converti a int se possibile
+        participant_ids = [int(pid) if isinstance(pid, (int, float)) else pid for pid in participant_ids]
+        split_dict[col] = participant_ids
+    
+    return split_dict
+
+def _load_splits_from_directory(splits_dir: str):
+    """
+    Carica tutti gli split da una cartella contenente file CSV.
+    Aspetta file nominati come split_0.csv, split_1.csv, ecc.
+    
+    Args:
+        splits_dir (str): Percorso alla cartella contenente i file split_*.csv
     
     Returns:
         list: Una lista di dizionari con gli split per ogni fold.
     """
-    df = pd.read_csv(csv_path)
-    
-    # Raggruppa per fold
     splits = []
-    for fold_idx in sorted(df['fold_idx'].unique()):
-        fold_data = df[df['fold_idx'] == fold_idx]
-        split_dict = {}
-        
-        for split_type in fold_data['split_type'].unique():
-            participant_ids = fold_data[fold_data['split_type'] == split_type]['participant_id'].tolist()
-            # Converti a int se possibile
-            participant_ids = [int(pid) if isinstance(pid, (int, float)) else pid for pid in participant_ids]
-            split_dict[split_type] = participant_ids
-        
-        splits.append(split_dict)
+    split_idx = 0
     
-    print(f"Caricati {len(splits)} fold dal CSV: {csv_path}")
+    while True:
+        split_file = os.path.join(splits_dir, f"split_{split_idx}.csv")
+        if not os.path.exists(split_file):
+            break
+        splits.append(_load_splits_from_csv(split_file))
+        split_idx += 1
+    
+    if splits:
+        print(f"Caricati {len(splits)} fold dalla cartella: {splits_dir}")
+    
     return splits
 
-def _save_splits_to_csv(splits: list, csv_path: str):
+def _save_splits_to_csv(splits: list, splits_dir: str):
     """
-    Salva gli split in un file CSV.
+    Salva gli split in CSV separati per ogni fold.
+    Crea file nominati split_0.csv, split_1.csv, ecc. con colonne train, val, test (o internal_val).
     
     Args:
         splits (list): Lista di dizionari con gli split per ogni fold.
-        csv_path (str): Percorso dove salvare il file CSV.
+        splits_dir (str): Cartella dove salvare i file CSV.
     """
-    rows = []
-    for fold_idx, split_dict in enumerate(splits):
-        for split_type, participant_ids in split_dict.items():
-            for pid in participant_ids:
-                rows.append({
-                    'fold_idx': fold_idx,
-                    'split_type': split_type,
-                    'participant_id': pid
-                })
+    os.makedirs(splits_dir, exist_ok=True)
     
-    df = pd.DataFrame(rows)
-    df.to_csv(csv_path, index=False)
-    print(f"Split salvati in CSV: {csv_path}")
+    for fold_idx, split_dict in enumerate(splits):
+        # Determina il numero massimo di partecipanti in una colonna
+        max_len = max(len(ids) for ids in split_dict.values())
+        
+        # Crea un dizionario con le colonne, riempiendo con NaN
+        data = {}
+        for split_type, participant_ids in split_dict.items():
+            # Crea una lista riempita con NaN per allineare le lunghezze
+            padded_ids = participant_ids + [np.nan] * (max_len - len(participant_ids))
+            data[split_type] = padded_ids
+        
+        df = pd.DataFrame(data)
+        split_filepath = os.path.join(splits_dir, f"split_{fold_idx}.csv")
+        df.to_csv(split_filepath, index=False)
+        print(f"Split {fold_idx} salvato in: {split_filepath}")
+    
+    print(f"Totale {len(splits)} split salvati in: {splits_dir}")
 
-def _find_splits_file(splits_dir: str, k: int, random_state: int, internal_val_size: float = 0.0):
+def _find_splits_directory(splits_dir: str, k: int, random_state: int, internal_val_size: float = 0.0):
     """
-    Trova il file CSV degli split nella cartella.
+    Trova la cartella degli split per un dato setting.
     
     Args:
-        splits_dir (str): Cartella degli split.
+        splits_dir (str): Cartella base degli split.
         k (int): Numero di fold.
         random_state (int): Seed.
         internal_val_size (float): Percentuale di validation interna.
     
     Returns:
-        str: Percorso al file CSV trovato, o None se non esiste.
+        str: Percorso alla cartella degli split, o None se non esiste.
     """
     if internal_val_size > 0:
         internal_val_pct = int(internal_val_size * 100)
-        base_name = f"k_{k}_splits_seed_{random_state}__in_val_{internal_val_pct}"
+        folder_name = f"k_{k}_splits_seed_{random_state}__in_val_{internal_val_pct}"
     else:
-        base_name = f"k_{k}_splits_seed_{random_state}"
+        folder_name = f"k_{k}_splits_seed_{random_state}"
     
-    csv_path = os.path.join(splits_dir, f"{base_name}.csv")
+    folder_path = os.path.join(splits_dir, folder_name)
     
-    if os.path.exists(csv_path):
-        return csv_path
+    if os.path.isdir(folder_path):
+        return folder_path
     else:
         return None
 
@@ -148,13 +175,16 @@ def get_k_fold_splits(processed_data_path: str, k: int, splits_dir: str, random_
     Crea o carica gli split per la K-Fold Cross-Validation stratificata.
     Se internal_val_size > 0, crea split aggiuntivi per validation e test interno.
     Se splits_csv_path è fornito, carica gli split da quel file CSV.
-    Quando crea nuovi split, li salva in CSV.
-    Quando carica split da splits_dir, cerca il file CSV.
+    
+    Gli split vengono organizzati in cartelle con uno split per file CSV:
+    - Per ogni setting (k, seed, internal_val_size) crea una cartella
+    - Dentro la cartella: split_0.csv, split_1.csv, ecc.
+    - Ogni CSV ha colonne: train, val/internal_val, test
     
     Args:
         processed_data_path (str): Percorso al file CSV con i dati processati.
         k (int): Numero di fold.
-        splits_dir (str): Cartella dove salvare/caricare i file degli split.
+        splits_dir (str): Cartella base dove salvare/caricare i file degli split.
         random_state (int): Seed per la riproducibilità.
         internal_val_size (float): Percentuale di training da usare come validation interna (0.0 = disabilitato).
         splits_csv_path (str): Percorso al CSV contenente gli split predefiniti (opzionale).
@@ -163,22 +193,25 @@ def get_k_fold_splits(processed_data_path: str, k: int, splits_dir: str, random_
         list: Una lista di dizionari. Senza internal_val: {'train': [...], 'val': [...]}
               Con internal_val: {'train': [...], 'internal_val': [...], 'test': [...]}
     """
-    # 0. Se splits_csv_path è fornito, carica gli split da CSV
+    # 0. Se splits_csv_path è fornito, carica gli split da un singolo file CSV esterno
     if splits_csv_path is not None:
-        if os.path.exists(splits_csv_path):
-            print(f"Caricamento degli split da CSV esterno: {splits_csv_path}")
-            return _load_splits_from_csv(splits_csv_path)
+        if os.path.isdir(splits_csv_path):
+            # È una cartella con split_*.csv
+            print(f"Caricamento degli split dalla cartella: {splits_csv_path}")
+            return _load_splits_from_directory(splits_csv_path)
         else:
-            raise FileNotFoundError(f"File CSV degli split non trovato: {splits_csv_path}")
+            raise ValueError(f"splits_csv_path deve essere una cartella con split_*.csv: {splits_csv_path}")
     
-    # Crea la cartella degli split se non esiste
+    # Crea la cartella base degli split se non esiste
     os.makedirs(splits_dir, exist_ok=True)
     
-    # 1. Prova a trovare e caricare il file CSV degli split in splits_dir
-    existing_file = _find_splits_file(splits_dir, k, random_state, internal_val_size)
-    if existing_file is not None:
-        print(f"Caricamento degli split esistenti da: {existing_file}")
-        return _load_splits_from_csv(existing_file)
+    # 1. Prova a trovare e caricare gli split da una cartella esistente
+    existing_dir = _find_splits_directory(splits_dir, k, random_state, internal_val_size)
+    if existing_dir is not None:
+        print(f"Caricamento degli split dalla cartella: {existing_dir}")
+        splits = _load_splits_from_directory(existing_dir)
+        if splits:
+            return splits
 
     # 2. Se non esiste, crea nuovi split
     print(f"Creazione di nuovi split per k={k} con seed={random_state}...")
@@ -224,14 +257,14 @@ def get_k_fold_splits(processed_data_path: str, k: int, splits_dir: str, random_
                 'val': test_ids
             })
 
-    # 3. Salva gli split in CSV (nuovo default)
+    # 3. Salva gli split in CSV separati nella cartella appropriata
     if internal_val_size > 0:
         internal_val_pct = int(internal_val_size * 100)
-        split_filename = f"k_{k}_splits_seed_{random_state}__in_val_{internal_val_pct}.csv"
+        folder_name = f"k_{k}_splits_seed_{random_state}__in_val_{internal_val_pct}"
     else:
-        split_filename = f"k_{k}_splits_seed_{random_state}.csv"
+        folder_name = f"k_{k}_splits_seed_{random_state}"
     
-    split_filepath = os.path.join(splits_dir, split_filename)
-    _save_splits_to_csv(splits, split_filepath)
+    splits_folder = os.path.join(splits_dir, folder_name)
+    _save_splits_to_csv(splits, splits_folder)
     
     return splits

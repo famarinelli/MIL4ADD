@@ -42,7 +42,7 @@ def main():
             for group_params in group_combinations:
                 job_counter += 1
 
-                if job_counter > 3: continue
+                # if job_counter > 3: continue
                 
                 # Unione dei parametri: Fixed + Base + Group
                 final_params = deepcopy(config["fixed_params"])
@@ -80,7 +80,7 @@ def main():
                 ] + args_list # <--- Appendiamo la lista degli argomenti qui
                 
                 subprocess.run(cmd)
-                time.sleep(0.5)
+                time.sleep(0.2)
 
     print(f"\n--- Grid Search Launched: {job_counter} jobs submitted ---")
 
