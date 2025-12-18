@@ -42,7 +42,7 @@ def main():
             for group_params in group_combinations:
                 job_counter += 1
 
-                # if job_counter > 3: continue
+                # if job_counter > 1: continue
                 
                 # Unione dei parametri: Fixed + Base + Group
                 final_params = deepcopy(config["fixed_params"])

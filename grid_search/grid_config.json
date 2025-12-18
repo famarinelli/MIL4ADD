@@ -1,36 +1,36 @@
 {
-    "project_name": "MIL4ADD_FullGrid",
+    "project_name": "MIL4ADD_Grid",
     "script_path": "train.py",
     "slurm_template": "jobs/grid_search/grid_template.sh",
     
     "fixed_params": {
         "processed_csv": "data/processed/processed_instances.csv",
         "embedding_files": ["data/embeddings/roberta-base_embeddings.pt", "data/embeddings/google_mt5-base_embeddings.pt"],
-        "k_folds": 5,
+        "k_folds": 4,
         "epochs": 100,
-        "batch_size": 32,
+        "batch_size": 128,
         "model_name": "MultiMTRB",
-        "wandb_project": "MIL4ADD",
+        "wandb_project": "MIL4ADD_Grid",
         "wandb_entity": "multimodal_decider",
-        "internal_val_size": 0.15,
+        "internal_val_size": 0.25,
         "mc_dropout_samples": 10,
-        "max_instances": 50
+        "max_instances": 40
     },
 
     "base_grid": {
-        "alpha": [0.75, 0.85],
-        "beta": [4, 6],
-        "hidden_dim": [128, 256],
+        "alpha": [0.75, 0.85, 0.95],
+        "beta": [3, 5, 7],
+        "hidden_dim": [64, 128],
         "dropout": [0.3, 0.5]
     },
 
     "conditional_groups": [
         {
             "name": "AdamW_Cosine",
-            "description": "Standard moderno per Transformer. Veloce e stabile.",
+            "description": "Configurazione Paper (LR 0.001) con Scheduler moderno.",
             "grid": {
                 "optimizer": ["AdamW"],
-                "lr": [0.001, 0.0005],
+                "lr": [0.001],
                 "weight_decay": [0.01],
                 "scheduler": ["Cosine"],
                 "lr_min": [1e-6]
@@ -38,7 +38,7 @@
         },
         {
             "name": "AdamW_Plateau",
-            "description": "AdamW con riduzione LR adattiva. Buono se non sai quante epoche servono.",
+            "description": "Configurazione Paper (LR 0.001) con Scheduler adattivo.",
             "grid": {
                 "optimizer": ["AdamW"],
                 "lr": [0.001],
@@ -50,10 +50,10 @@
         },
         {
             "name": "SGD_Momentum_Cosine",
-            "description": "SGD spesso generalizza meglio di Adam. Qui testiamo il Momentum.",
+            "description": "SGD con Momentum. Testiamo LR paper (0.001) e LR standard SGD (0.01).",
             "grid": {
                 "optimizer": ["SGD"],
-                "lr": [0.01, 0.005], 
+                "lr": [0.001, 0.01], 
                 "momentum": [0.9],
                 "weight_decay": [1e-4],
                 "scheduler": ["Cosine"],
@@ -62,11 +62,11 @@
         },
         {
             "name": "SGD_Momentum_Plateau",
-            "description": "SGD con Plateau. Utile per spremere il modello alla fine.",
+            "description": "SGD con Plateau. Testiamo LR paper (0.001) e LR standard SGD (0.01).",
             "grid": {
                 "optimizer": ["SGD"],
-                "lr": [0.01],
-                "momentum": [0.8, 0.9],
+                "lr": [0.001, 0.01],
+                "momentum": [0.9],
                 "weight_decay": [1e-4],
                 "scheduler": ["Plateau"],
                 "lr_patience": [15],
